@@ -1,11 +1,8 @@
 import tensorflow as tf
 import numpy as np
 
-from tensorflow.contrib import slim
-
-tf.app.flags.DEFINE_integer('text_scale', 512, '')
-
-from nets import resnet_v1
+import tensorflow.contrib.slim as slim
+from tensorflow.contrib.slim.nets import resnet_v1
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -75,10 +72,11 @@ def model(images, weight_decay=1e-5, is_training=True):
             # this is do with the angle map
             ts_score = slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
             # 4 channel of axis aligned bbox and 1 channel rotation angle
-            tcbp_score = slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) * FLAGS.text_scale
+            tcbp_score = slim.conv2d(g[3], 1, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None)
             tcd_score = (slim.conv2d(g[3], 2, 1, activation_fn=tf.nn.sigmoid, normalizer_fn=None) - 0.5) * 2
+            f_score = tf.concat([ts_score, tcbp_score, tcd_score], axis=-1)
 
-    return ts_score, tcbp_score, tcd_score
+    return f_score
 
 
 def dice_coefficient(y_true_cls, y_pred_cls,
@@ -113,23 +111,8 @@ def loss(y_true_cls, y_pred_cls,
     :param training_mask: mask used in training, to ignore some text annotated by ###
     :return:
     '''
-    classification_loss = dice_coefficient(y_true_cls, y_pred_cls, training_mask)
-    # scale classification loss to match the iou loss part
-    classification_loss *= 0.01
+    ts_gt, tcbp_gt, tcd1_gt, tcd2_gt = tf.split(value=y_true_geo, num_or_size_splits=5, axis=3)
+    ts_pred, tcbp_pred, tcd1_pred, tcd2_pred, theta_pred = tf.split(value=y_pred_geo, num_or_size_splits=5, axis=3)
+    cls_loss = dice_coefficient(ts_gt, ts_pred, training_mask)
 
-    # d1 -> top, d2->right, d3->bottom, d4->left
-    d1_gt, d2_gt, d3_gt, d4_gt, theta_gt = tf.split(value=y_true_geo, num_or_size_splits=5, axis=3)
-    d1_pred, d2_pred, d3_pred, d4_pred, theta_pred = tf.split(value=y_pred_geo, num_or_size_splits=5, axis=3)
-    area_gt = (d1_gt + d3_gt) * (d2_gt + d4_gt)
-    area_pred = (d1_pred + d3_pred) * (d2_pred + d4_pred)
-    w_union = tf.minimum(d2_gt, d2_pred) + tf.minimum(d4_gt, d4_pred)
-    h_union = tf.minimum(d1_gt, d1_pred) + tf.minimum(d3_gt, d3_pred)
-    area_intersect = w_union * h_union
-    area_union = area_gt + area_pred - area_intersect
-    L_AABB = -tf.log((area_intersect + 1.0)/(area_union + 1.0))
-    L_theta = 1 - tf.cos(theta_pred - theta_gt)
-    tf.summary.scalar('geometry_AABB', tf.reduce_mean(L_AABB * y_true_cls * training_mask))
-    tf.summary.scalar('geometry_theta', tf.reduce_mean(L_theta * y_true_cls * training_mask))
-    L_g = L_AABB + 20 * L_theta
-
-    return tf.reduce_mean(L_g * y_true_cls * training_mask) + classification_loss
+    return cls_loss + 5*tcbp_loss+2.5*tcd_loss
